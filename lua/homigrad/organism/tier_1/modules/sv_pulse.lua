@@ -57,6 +57,9 @@ module[2] = function(owner, org, timeValue)
 	heartbeat = heartbeat - 40 * math.min(org.analgesia / 2.5, 1)
 	heartbeat = heartbeat + 100 * math.Clamp(math.Remap(org.temperature, 40, 42, 0, 1), 0, 1)
 	heartbeat = heartbeat - 160 * (1 - math.Clamp(math.Remap(org.temperature, 28, 36.7, 0, 1), 0, 1))
+	-- Pulmonary edema tachycardia: the heart beats faster to compensate for
+	-- the low blood oxygen caused by fluid in the lungs.
+	heartbeat = heartbeat + 50 * math.Clamp(org.pulmonaryedema or 0, 0, 1)
 
 	org.heartbeat = math.Approach(org.heartbeat, heartbeat, heartbeat > org.heartbeat and timeValue * 5 or timeValue * 3)
 	

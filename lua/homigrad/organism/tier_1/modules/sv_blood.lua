@@ -5,6 +5,10 @@ local max, min, Round = math.max, math.min, math.Round
 hg.organism.module.blood = {}
 local module = hg.organism.module.blood
 
+local JUGULAR_HEMATOMA_LIMIT  = 20    -- accumulated open-wound time before airway compression starts
+local JUGULAR_O2_DRAIN        = 8     -- o2[1] drained per second once past the hematoma limit (arteria's is 5)
+local JUGULAR_EMBOLISM_CHANCE = 0.01  -- ~chance per second of sudden cardiac arrest while jugular == 1
+
 hg.organism.bloodtypes = {
 	["o-"] = {["o-"] = true,["o+"] = true,["a-"] = true,["a+"] = true,["b-"] = true,["b+"] = true,["ab-"] = true,["ab+"] = true},
 	["o+"] = {["o+"] = true,["a+"] = true,["b+"] = true,["ab+"] = true},
@@ -28,17 +32,17 @@ module[1] = function(org)
 	org.rlegartery = 0
 	org.llegartery = 0
 	org.spineartery = 0
+	org.jugular = 0
+	org.templeartery = 0
 	org.bleedStart = 0
 	org.wounds = {}
 	org.arterialwounds = {}
 	org.wantToVomit = 0
 	org.vomitInThroat = nil
 
-	org.bloodtype = table.GetKeys(hg.organism.bloodtypes)[math.random(8)]
-	
-	if org.bloodtype == "c-" then
-		org.bloodtype = "o-" --эпик
-	end
+	-- Explicitly pick from only the 8 valid human blood types, never "c-"
+	local validBloodTypes = {"o-","o+","a-","a+","b-","b+","ab-","ab+"}
+	org.bloodtype = validBloodTypes[math.random(#validBloodTypes)]
 
 	org.hemotransfusionshock = 0
 
@@ -100,6 +104,26 @@ module[2] = function(owner, org, mulTime)
 		org.o2[1] = math.max(org.o2[1] - mulTime * 5,0)
 	end
 
+	if org.jugular == 1 then
+		-- Hematoma builds while the vein is open; unlike the carotid this doesn't
+		-- choke off oxygen immediately, it's the pooling blood compressing the
+		-- airway over time that eventually does.
+		org.jugularHematoma = (org.jugularHematoma or 0) + mulTime
+		if org.jugularHematoma >= JUGULAR_HEMATOMA_LIMIT then
+			org.o2[1] = math.max(org.o2[1] - mulTime * JUGULAR_O2_DRAIN, 0)
+		end
+
+		-- Air embolism: negative venous pressure can pull air into the bloodstream
+		-- and lock up the heart. Small continuous chance while the wound is open.
+		if not org.jugularEmbolism and math.random() < JUGULAR_EMBOLISM_CHANCE * mulTime then
+			org.jugularEmbolism = true
+			org.heart = 1
+		end
+	else
+		org.jugularHematoma = 0
+		org.jugularEmbolism = nil
+	end
+
 	org.consciousness = math.min(org.consciousness, math.min(org.blood / 3000, 1) * math.Clamp(((org.temperature < 30 and org.temperature - 30 or 0) * 0.25 + 1), 0.25, 1))
 
 	local beatsPerSecond = max(min(60 / math.max(org.pulse,2) / (org.bleed / 15), 7), 0.3)
@@ -146,24 +170,78 @@ module[2] = function(owner, org, mulTime)
 	bleedoutspeed = bleedoutspeed / (beatsPerSecond + 2)
 
 	local bleedoutspeed2 = 0
-	local next_arterypump = 1 / math.max(org.pulse, 10)
-	local ent = owner:IsPlayer() and IsValid(owner.FakeRagdoll) and owner.FakeRagdoll or owner
-	for i, wound in pairs(org.arterialwounds) do
-		bleedoutspeed2 = bleedoutspeed2 + wound[1] * mulTime * 0.2 * math.max(org.pulse, 20) / 80
 
-		if wound[5] + next_arterypump * 2 < time then
+	-- Blood pressure: sprays weaken and shorten as blood volume drops, instead of
+	-- pumping at constant force until the wound suddenly stops mattering.
+	-- 1.0 = full pressure (near 5000 blood), floors out at 0.15 so a near-empty
+	-- victim still wells/oozes rather than jetting.
+	local bloodPressure = math.Clamp(org.blood / 5000, 0.15, 1)
+
+	-- Arteries pump in phase with the actual heartbeat rather than an independent
+	-- timer, so the visible spurt lines up with the pulse instead of drifting.
+	local beatInterval = 60 / math.max(org.pulse, 10)
+	if not org.lastHeartbeat then org.lastHeartbeat = time end
+	local pumpedThisTick = false
+	if time - org.lastHeartbeat >= beatInterval then
+		org.lastHeartbeat = time
+		pumpedThisTick = true
+	end
+
+	local ent = owner:IsPlayer() and IsValid(owner.FakeRagdoll) and owner.FakeRagdoll or owner
+	local has_arterial = #org.arterialwounds > 0
+	for i, wound in pairs(org.arterialwounds) do
+		-- Increased baseline bleed contribution (0.2 -> 0.45) so arterials drain fast even between pumps,
+		-- scaled down as blood pressure falls
+		bleedoutspeed2 = bleedoutspeed2 + wound[1] * mulTime * 0.45 * math.max(org.pulse, 20) / 80 * bloodPressure
+
+		if wound[7] == "jugular" then
+			-- Venous bleed: not driven by the heartbeat, pours out continuously
+			-- and heavily rather than spurting once per pulse.
+			org.blood = max(org.blood - wound[1] * mulTime * 6.0 * bloodPressure, 1)
+
+			if (owner:IsPlayer() and owner:Alive()) or not owner:IsPlayer() then
+				local pos, ang = ent:GetBonePosition(ent:LookupBone(wound[4]))
+				local dir = wound[6]
+				local len = dir:Length()
+				local _, dir = LocalToWorld(vecZero, dir:Angle(), vecZero, ang)
+				-- A steady pour, not an arced jet: shorter travel, biased downward instead of up
+				local pourDir = -dir:Forward() * len * 0.8 * bloodPressure
+				hg.organism.BloodDroplet2(owner, org, wound, owner:GetVelocity() + VectorRand(-10, 10) + pourDir, true)
+			end
+
+			wound[1] = math.max(wound[1] - mulTime * 0.0015 * bloodPressure, 0)
+			if wound[1] <= 0.001 then
+				wound[1] = 0
+				table.remove(org.arterialwounds, i)
+				owner:SetNetVar("arterialwounds", org.arterialwounds)
+
+				org[wound[7]] = 0
+			end
+		elseif pumpedThisTick then
 			local pos, ang = ent:GetBonePosition(ent:LookupBone(wound[4]))
 			wound[5] = time
-			org.blood = max(org.blood - wound[1] * mulTime * 4.5 * math.max(org.pulse, 20) / 80, 1)
+			-- Increased per-pump blood loss (4.5 -> 9.0) — arterial spray is violent, tempered by pressure
+			org.blood = max(org.blood - wound[1] * mulTime * 9.0 * math.max(org.pulse, 20) / 80 * bloodPressure, 1)
 			if (owner:IsPlayer() and owner:Alive()) or not owner:IsPlayer() then
 				local dir = wound[6]
 				local len = dir:Length()
 				local _, dir = LocalToWorld(vecZero, dir:Angle(), vecZero, ang)
-				dir = -dir:Forward() * len
-				hg.organism.BloodDroplet2(owner, org, wound, owner:GetVelocity() + VectorRand(-10, 10) + dir, true)
+				-- Stronger spray: multiply direction length so blood travels further, scaled by pressure
+				-- so a bled-out victim only wells up rather than jetting across the room
+				local sprayDir = -dir:Forward() * len * 2.5 * bloodPressure
+				-- Fake ballistic arc: bias the initial vector upward so gravity (applied by the
+				-- particle system) pulls it into a believable arc instead of a flat straight jet
+				sprayDir = sprayDir + Vector(0, 0, len * 0.8 * bloodPressure)
+				hg.organism.BloodDroplet2(owner, org, wound, owner:GetVelocity() + VectorRand(-25, 25) + sprayDir, true)
 			end
 
-			if wound[1] == 0 then
+			-- Self-tamponade: as pressure drops the wound can very slowly start clotting on its
+			-- own, on top of whatever external coagulate/heal effects exist
+			wound[1] = math.max(wound[1] - mulTime * 0.002 * bloodPressure, 0)
+
+			-- Use a small threshold instead of exact == 0 (math.Approach never guarantees exact 0)
+			if wound[1] <= 0.001 then
+				wound[1] = 0
 				table.remove(org.arterialwounds, i)
 				owner:SetNetVar("arterialwounds", org.arterialwounds)
 
@@ -171,7 +249,7 @@ module[2] = function(owner, org, mulTime)
 			end
 		end
 	end
-	bleedoutspeed2 = bleedoutspeed2 / next_arterypump
+	bleedoutspeed2 = bleedoutspeed2 / beatInterval
 
 	if org.blood < (2400 / (adrenaline / 3 + 1)) * ((math.cos(CurTime()/2) + 1) / 2 * 0.1 + 1) then org.needotrub = true end
 
@@ -200,8 +278,9 @@ module[2] = function(owner, org, mulTime)
 		hg.organism.Vomit(owner)
 	end
 
-	org.bleed = (bleedoutspeed + bleedoutspeed2 + bleed)--в секунду
-	
+	-- Include internal bleed (bleed) in the running total used for timetouncon calculations
+	org.bleed = bleedoutspeed + bleedoutspeed2 + bleed --в секунду
+
 	local timetouncon = (org.blood - 2500) / org.bleed
 	
 	local bleeding_will_stop = (timetouncon ~= timetouncon) or ((coagulatespeed * timetouncon - org.bleed) > 0)
@@ -220,7 +299,7 @@ module[2] = function(owner, org, mulTime)
 		org.critical = false
 	end
 
-	org.bleed = (bleedoutspeed + bleedoutspeed2)
+	-- org.bleed already set above with internal bleed included; no second assignment needed
 end
 
 util.AddNetworkString("bloodsquirt2")
@@ -271,6 +350,15 @@ function hg.organism.CoughBlood(org)
 	ply.lastPhr = phr
 
 	if math.random(5) == 1 then
+		-- BUG FIX: ent/bon/mat were undefined — resolve them here from the character entity
+		local ent = hg.GetCurrentCharacter(ply)
+		if not IsValid(ent) then return end
+
+		local bon = "ValveBiped.Bip01_Head1"
+		local bone = ent:LookupBone(bon)
+		local mat = ent:GetBoneMatrix(bone)
+		if not mat then return end
+
 		org.vomitInThroat = nil
 
 		net.Start("bloodsquirt2")
@@ -287,4 +375,76 @@ end
 
 function hg.organism.BloodDroplet2(owner, org, wound, dir, artery)
 	hook.Run("HG_BloodParticleStartedDropping", owner, org, wound, dir, artery)
+end
+
+-- ============================================================
+-- TryArterialHit
+-- Called by knives/slashing weapons after a successful hit.
+--
+-- target  : entity that was hit
+-- trace   : trace result from the attack (provides HitGroup + HitNormal)
+-- chance  : 1-in-N integer  (lower = more likely;  e.g. 5 = 20%)
+-- severity: arterial wound size, 0-1  (default random 0.6-1.0)
+--
+-- Returns true if an arterial wound was actually created.
+-- ============================================================
+local HITGROUP_TO_ARTERY = {
+	[HITGROUP_CHEST]    = { bone = "ValveBiped.Bip01_Spine2",     field = "spineartery" },
+	[HITGROUP_STOMACH]  = { bone = "ValveBiped.Bip01_Spine1",     field = "spineartery" },
+	[HITGROUP_LEFTARM]  = { bone = "ValveBiped.Bip01_L_UpperArm", field = "larmartery"  },
+	[HITGROUP_RIGHTARM] = { bone = "ValveBiped.Bip01_R_UpperArm", field = "rarmartery"  },
+	[HITGROUP_LEFTLEG]  = { bone = "ValveBiped.Bip01_L_Thigh",    field = "llegartery"  },
+	[HITGROUP_RIGHTLEG] = { bone = "ValveBiped.Bip01_R_Thigh",    field = "rlegartery"  },
+}
+
+-- Real arteries aren't created equal: a femoral-equivalent leg hit or a major
+-- torso vessel bleeds out drastically faster than an arm artery. This multiplier
+-- is applied to wound severity (which drives both bleed rate and pump volume).
+local ARTERY_SEVERITY_MULT = {
+	spineartery = 1.4, -- chest/abdomen, close to major vessels
+	rlegartery  = 1.6, -- femoral-equivalent, most lethal
+	llegartery  = 1.6,
+	rarmartery  = 0.8,
+	larmartery  = 0.8,
+}
+
+function hg.organism.TryArterialHit(target, trace, chance, severity)
+	if not IsValid(target) then return false end
+	local org = target.organism
+	if not org then return false end
+	if not org.arterialwounds then return false end
+
+	-- Only apply to hitgroups that map to a known artery
+	local data = HITGROUP_TO_ARTERY[trace and trace.HitGroup]
+	if not data then return false end
+
+	-- Don't re-hit an artery that is already bleeding
+	if org[data.field] and org[data.field] > 0 then return false end
+
+	-- Roll the dice
+	if math.random(chance) ~= 1 then return false end
+
+	local sev = severity or math.Rand(0.6, 1.0)
+	sev = sev * (ARTERY_SEVERITY_MULT[data.field] or 1)
+	-- Spray direction follows the hit normal inward
+	local dir = (trace.HitNormal or Vector(0, 0, 1)) * -sev
+
+	-- Wound entry: {severity, _, _, bone, lastPumpTime, sprayDir, arteryField}
+	table.insert(org.arterialwounds, {
+		sev,        -- [1] severity / bleed rate
+		false,      -- [2] unused
+		false,      -- [3] unused
+		data.bone,  -- [4] bone for blood-spray origin
+		0,          -- [5] last pump timestamp (0 = pump immediately)
+		dir,        -- [6] spray direction
+		data.field  -- [7] organism field name to set/clear
+	})
+	target:SetNetVar("arterialwounds", org.arterialwounds)
+	org[data.field] = 1
+
+	if target:IsPlayer() then
+		target:Notify(artery_hit_phrases[math.random(#artery_hit_phrases)], 8, "artery_slash", 0)
+	end
+
+	return true
 end

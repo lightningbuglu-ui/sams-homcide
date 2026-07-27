@@ -152,6 +152,8 @@ local arterySize = {
 	["rlegartery"] = 9,
 	["llegartery"] = 9,
 	["spineartery"] = 10,
+	["jugular"] = 8,
+	["templeartery"] = 4,
 }
 
 local arteryMessages ={
@@ -160,25 +162,58 @@ local arteryMessages ={
 	"I'm bleeding out of my neck!"
 }
 
+local jugularMessages = {
+	"My neck feels warm... too warm.",
+	"Something's wrong with my throat.",
+	"I'm bleeding out of my neck!"
+}
+
+local slashToArtery = {
+	["rarmup"] = "rarmartery",
+	["rarmdown"] = "rarmartery",
+	["larmup"] = "larmartery",
+	["larmdown"] = "larmartery",
+	["rlegup"] = "rlegartery",
+	["rlegdown"] = "rlegartery",
+	["llegup"] = "llegartery",
+	["llegdown"] = "llegartery",
+}
+
+local function getArteryChanceMul(dmgInfo)
+	local inflictor = dmgInfo:GetInflictor()
+	return IsValid(inflictor) and inflictor.ArteryChance or 1
+end
+
 local function hitArtery(artery, org, dmg, dmgInfo, boneindex, dir, hit)
 	if isCrush(dmgInfo) then return 1 end
 	if dmgInfo:IsDamageType(DMG_BLAST) then return 1 end
-	if dmgInfo:IsDamageType(DMG_SLASH) and (math.random(5) != 1) and dmg < 2 then return end
+	if dmgInfo:IsDamageType(DMG_SLASH) and dmg < 2 then
+		local arteryChanceMul = getArteryChanceMul(dmgInfo)
+		local arteryChance = arteryChanceMul >= 2 and 1 or math.Clamp(0.85 * arteryChanceMul, 0, 1)
+
+		if math.Rand(0, 1) > arteryChance then return end
+	end
 	org.painadd = org.painadd + dmg * 1
 	if org[artery] == 1 then return 0 end
 	if org[string.Replace(artery, "artery", "").."amputated"] then return end
 
-	if artery ~= "arteria" then
-		hg.AddHarmToAttacker(dmgInfo, 4, "Random artery punctured harm")//((1 - org[artery]) - math.max((1 - org[artery]) - dmg,0)) / 4
-	else
+	if artery == "arteria" then
 		if org.isPly and not org.otrub then
 			org.owner:Notify(table.Random(arteryMessages), true, "arteria", 0)
 		end
-		
+
 		hg.AddHarmToAttacker(dmgInfo, 15, "Carotid artery punctured harm")
+	elseif artery == "jugular" then
+		if org.isPly and not org.otrub then
+			org.owner:Notify(table.Random(jugularMessages), true, "jugular", 0)
+		end
+
+		hg.AddHarmToAttacker(dmgInfo, 10, "Jugular vein punctured harm")
+	else
+		hg.AddHarmToAttacker(dmgInfo, 4, "Random artery punctured harm")//((1 - org[artery]) - math.max((1 - org[artery]) - dmg,0)) / 4
 	end
 
-	org[artery] = math.min(org[artery] + 1, 1)
+	org[artery] = math.min((org[artery] or 0) + 1, 1)
 
 	local owner = org.owner
 	local bonea = owner:LookupBone(boneindex)
@@ -189,8 +224,29 @@ local function hitArtery(artery, org, dmg, dmgInfo, boneindex, dir, hit)
 	return 0
 end
 
+hook.Add("PreTraceOrganBulletDamage", "hg_melee_artery_chance", function(org, bone, dmg, dmgInfo, box, dir, hit, ricochet, organ)
+	if not dmgInfo:IsDamageType(DMG_SLASH) then return end
+
+	local artery = organ and slashToArtery[organ[1]]
+	if not artery then return end
+	if getArteryChanceMul(dmgInfo) <= 1 then return end
+
+	local arteryChance = math.Clamp(getArteryChanceMul(dmgInfo), 0, 1)
+	if math.Rand(0, 1) > arteryChance then return end
+
+	hitArtery(artery, org, dmg, dmgInfo, box[6], dir, hit)
+end)
+
 input_list.arteria = function(org, bone, dmg, dmgInfo, boneindex, dir, hit)
 	return hitArtery("arteria", org, dmg, dmgInfo, "ValveBiped.Bip01_Neck1", dir, hit)
+end
+
+input_list.jugular = function(org, bone, dmg, dmgInfo, boneindex, dir, hit)
+	return hitArtery("jugular", org, dmg, dmgInfo, "ValveBiped.Bip01_Neck1", dir, hit)
+end
+
+input_list.templeartery = function(org, bone, dmg, dmgInfo, boneindex, dir, hit)
+	return hitArtery("templeartery", org, dmg, dmgInfo, "ValveBiped.Bip01_Head1", dir, hit)
 end
 
 input_list.rarmartery = function(org, bone, dmg, dmgInfo, boneindex, dir, hit) return hitArtery("rarmartery", org, dmg, dmgInfo, boneindex, dir, hit) end

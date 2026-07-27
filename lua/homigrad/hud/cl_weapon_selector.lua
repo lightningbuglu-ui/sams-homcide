@@ -48,7 +48,7 @@ end
 
 local scrW, scrH = ScrW(), ScrH()
 
-local AcsentColor = Color(155,0,0)
+local AcsentColor = Color(100,0,180)
 local gradient_u = Material("vgui/gradient-d")
 
 function WS.WeaponSelectorDraw( ply )
@@ -63,7 +63,18 @@ function WS.WeaponSelectorDraw( ply )
     local SelectedWep = WS.GetSelectedWeapon()
     if not IsValid(SelectedWep) then return end
     WS.Transparent = LerpFT( 0.2, WS.Transparent, math.min( WS.Show - CurTime(), 1 ) )
-    --draw.RoundedBox(0,(scrW / 2)-10,(scrH *0.15),20,20, color_red )
+
+    -- Typed-out weapon name above selected weapon
+    local selectedWepName = IsValid(SelectedWep) and WS.GetPrintName(SelectedWep) or ""
+    if WS.LastTypedName ~= selectedWepName then
+        WS.LastTypedName = selectedWepName
+        WS.TypeProgress = 0
+        WS.TypeStartTime = CurTime()
+    end
+    local typeSpeed = 18 -- characters per second
+    WS.TypeProgress = math.min(#selectedWepName, math.floor((CurTime() - (WS.TypeStartTime or 0)) * typeSpeed))
+    local displayedName = string.sub(selectedWepName, 1, WS.TypeProgress)
+
     local SuperAmmout = 0
     local AmmoutSlots = 0
     for i = 0, #Weapons do
@@ -118,16 +129,29 @@ function WS.WeaponSelectorDraw( ply )
                 2, 
                 ColorAlpha(color_black,WS.Transparent*205) 
             )
-            surface.SetDrawColor( 155, 0, 0, WS.Transparent*( SelectedWep == wep and 200 or 0 )  )
+            surface.SetDrawColor( 100, 0, 180, WS.Transparent*( SelectedWep == wep and 200 or 0 )  )
             surface.SetMaterial( gradient_u )
             surface.DrawTexturedRect( position, (scrH * 0.025) * (Ammout) + (scrH * 0.05) + lastPos, sizeX, sizeH )
             if SelectedWep == wep then
-                surface.SetDrawColor( 255, 0, 0, WS.Transparent*155 )
+                surface.SetDrawColor( 160, 0, 255, WS.Transparent*155 )
 	            surface.DrawOutlinedRect( position, (scrH * 0.025) * (Ammout) + (scrH * 0.05) + lastPos, sizeX, sizeH, 2 )
             end
             local sizeHi = (scrH *0.025) * (Ammout) + (scrH * 0.05) + lastPos
             sizeHi = sizeHi + 2.5
-            WS.DrawText( WS.GetPrintName(wep), "HomigradFontSmall", position + sizeX/2, sizeHi, ColorAlpha(color_white,WS.Transparent*255) ,TEXT_ALIGN_CENTER )
+
+            if SelectedWep == wep then
+                -- Draw typed-out name only when this weapon is selected
+                local nameColor = Color(200, 160, 255, WS.Transparent * 255)
+                local shadowColor = Color(80, 0, 160, WS.Transparent * 180)
+                draw.DrawText( displayedName, "HomigradFontSmall", position + sizeX/2 + 2, sizeHi + 2, shadowColor, TEXT_ALIGN_CENTER )
+                draw.DrawText( displayedName, "HomigradFontSmall", position + sizeX/2, sizeHi, nameColor, TEXT_ALIGN_CENTER )
+            else
+                -- Show hashtags matching the length of the weapon name
+                local wepName = WS.GetPrintName(wep)
+                local hashes = string.rep("#", #wepName)
+                local hashColor = Color(100, 80, 120, WS.Transparent * 150)
+                WS.DrawText( hashes, "HomigradFontSmall", position + sizeX/2, sizeHi, hashColor, TEXT_ALIGN_CENTER )
+            end
             Ammout = Ammout + 1
 
             if SelectedWep == wep and wep.DrawWeaponSelection then
