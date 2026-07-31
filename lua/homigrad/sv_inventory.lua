@@ -446,6 +446,126 @@ hook.Add("Player Think", "loot-fellows",function(ply)
     end
 end)
 
+--[[
+    Give / "put in box" system
+
+    Mirrors ply_take_item, but moves an item from the PLAYER's inventory
+    into the TARGET entity's inventory instead of the other way around.
+    Works with any entity that already has an Inventory netvar (boxes,
+    ragdolls, whatever) -- there's nothing box-specific here, it just
+    reuses the same lootable-entity convention the rest of the file uses.
+]]
+local giveFunctions = {
+    ["Weapons"] = function(ply, ent, wep)
+        if not ent.inventory then return end
+        ent.inventory.Weapons = ent.inventory.Weapons or {}
+        if not ply.inventory.Weapons[wep] then return end
+        if ent.inventory.Weapons[wep] then return end -- slot taken, no stacking for now
+
+        local target
+        for _, w in ipairs(ply:GetWeapons()) do
+            if IsValid(w) and w:GetClass() == wep then
+                target = w
+                break
+            end
+        end
+
+        if IsValid(target) then
+            if ply:GetActiveWeapon() == target then
+                ply:SetActiveWeapon(NULL)
+            end
+
+            ply.nohook = true
+            ply:StripWeapon(wep)
+
+            target:SetNoDraw(true)
+            target:DrawShadow(false)
+            target:AddSolidFlags(FSOLID_NOT_SOLID)
+            target:SetPos(ent:GetPos() + vector_up * -10000)
+            target:SetParent(ent, 0)
+
+            ent.inventory.Weapons[wep] = target
+        else
+            -- no physical weapon entity (e.g. was stored as just a flag), store as-is
+            ent.inventory.Weapons[wep] = ply.inventory.Weapons[wep]
+        end
+
+        ply.inventory.Weapons[wep] = nil
+    end,
+
+    ["Ammo"] = function(ply, ent, ammo, amt)
+        if not ent.inventory then return end
+        ent.inventory.Ammo = ent.inventory.Ammo or {}
+
+        ammo = tonumber(ammo)
+        local have = ply.inventory.Ammo[ammo]
+        if not have or have <= 0 then return end
+
+        amt = math.Clamp(tonumber(amt) or have, 1, have)
+
+        ent.inventory.Ammo[ammo] = (ent.inventory.Ammo[ammo] or 0) + amt
+        ply:SetAmmo(have - amt, game.GetAmmoName(ammo))
+        ply.inventory.Ammo = ply:GetAmmo()
+    end,
+
+    ["Armor"] = function(ply, ent, placement)
+        if not ent.armors then return end
+        local armor = ply.armors and ply.armors[placement]
+        if not armor then return end
+        if ent.armors[placement] then return end -- box slot already has armor there
+
+        -- NOTE: swap this for whatever your codebase actually uses to
+        -- strip armor off a player (this file's hg.AddArmor has no
+        -- visible counterpart here, so this is a best guess).
+        if hg.RemoveArmor then
+            if not hg.RemoveArmor(ply, placement) then return end
+        else
+            ply.armors[placement] = nil
+        end
+
+        ent.armors[placement] = armor
+    end,
+
+    ["Attachments"] = function(ply, ent, index)
+        if not ent.inventory then return end
+        ent.inventory.Attachments = ent.inventory.Attachments or {}
+
+        index = tonumber(index)
+        local att = ply.inventory.Attachments and ply.inventory.Attachments[index]
+        if not att then return end
+
+        ent.inventory.Attachments[#ent.inventory.Attachments + 1] = att
+        table.remove(ply.inventory.Attachments, index)
+    end,
+}
+
+util.AddNetworkString("ply_give_item")
+net.Receive("ply_give_item", function(len, ply)
+    if (ply.cooldown_takeitem or 0) > CurTime() then return end
+    ply.cooldown_takeitem = CurTime() + 0.5
+
+    local tblIndex = net.ReadString()
+    local thing = net.ReadString()
+    local tbl = net.ReadTable()
+    local ent = net.ReadEntity()
+
+    if not IsValid(ent) or not IsValid(ply) then return end
+    if not ent:GetNetVar("Inventory") then return end
+    if ent:GetPos():Distance(ply:GetPos()) > 125 then return end
+
+    ply.inventory = ply.inventory or ply:GetNetVar("Inventory", {})
+    ent.inventory = ent.inventory or ent:GetNetVar("Inventory", {})
+    ent.armors = ent.armors or ent:GetNetVar("Armor", {})
+
+    local func = giveFunctions[tblIndex]
+    if func then func(ply, ent, thing, unpack(tbl)) end
+
+    ply:SetNetVar("Inventory", ply.inventory)
+    ent:SetNetVar("Inventory", ent.inventory)
+    ent:SetNetVar("Armor", ent.armors)
+    ply:SyncArmor()
+end)
+
 --// Prop inventory example
 --[[
 	local pos = Entity(1):GetEyeTrace().HitPos
