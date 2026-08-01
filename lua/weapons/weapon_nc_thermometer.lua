@@ -27,8 +27,8 @@ SWEP.SlotPos = 3
 SWEP.WorkWithFake = true
 -- TODO: painkillers' hand offset was tuned for a small pill bottle; a thermometer gun will
 -- likely sit differently in-hand. Adjust after testing in-game.
-SWEP.offsetVec = Vector(2.5, -2.5, 0)
-SWEP.offsetAng = Angle(-30, 20, 180)
+SWEP.offsetVec = Vector(2.5, -2, -2)
+SWEP.offsetAng = Angle(-8, 180, 180)
 SWEP.modeNames = {
 	[1] = "thermometer"
 }
@@ -47,7 +47,7 @@ SWEP.modeValuesdef = {
 	[1] = 1,
 }
 
-SWEP.CheckSnd = "nc_thermometer-beep.mp3"
+SWEP.CheckSnd = "sams-weapon-sounds/nc_thermometer-beep.mp3"
 
 SWEP.showstats = false
 
